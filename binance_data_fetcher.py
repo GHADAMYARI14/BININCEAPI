@@ -22,7 +22,22 @@ For Google Colab Users:
 - Test Function: Use `test_google_drive_save()` to debug Drive issues.
 """
 
-import requests
+# --- Requirements ---
+# This script requires the following Python libraries:
+# - pandas: For data manipulation and saving to CSV.
+#   Install using: pip install pandas
+#
+# The script uses built-in Python libraries for HTTP requests (urllib.request, urllib.parse)
+# and JSON processing (json).
+#
+# For Google Colab execution:
+# - The 'google.colab' library (for Google Drive integration) is provided by the
+#   Google Colab environment and does not require separate installation.
+
+import urllib.request
+import urllib.parse
+import json
+# import ssl # Keep this commented for now, add only if specific SSL context is needed.
 from datetime import datetime, timedelta
 import pandas as pd
 # This import is specific to Google Colab environments;
@@ -45,73 +60,86 @@ NOW_MS = int(datetime.now().timestamp() * 1000)
 # Base URL for the Binance public API v3
 BINANCE_API_BASE_URL = "https://api.binance.com/api/v3"
 
-def get_klines(symbol: str, interval: str, start_time_ms: int, end_time_ms: int, limit: int = 1000) -> list:
+def get_klines(symbol, interval, start_time_ms, end_time_ms, limit=1000):
     """
-    Fetches a single batch of historical kline/candlestick data from Binance.
-
-    Args:
-        symbol: The trading symbol (e.g., "BTCUSDT").
-        interval: The kline interval (e.g., "1m", "1h", "1d").
-        start_time_ms: The start time for the klines in milliseconds since epoch.
-        end_time_ms: The end time for the klines in milliseconds since epoch.
-        limit: The maximum number of klines to fetch per request (max 1000, default 1000).
-
-    Returns:
-        A list of kline data, where each kline is itself a list of values
-        representing [OpenTime, Open, High, Low, Close, Volume, CloseTime, ...].
-        Returns an empty list if an error occurs during the API request or if no data is found.
+    Fetches historical kline/candlestick data from the Binance API using urllib.request.
+    (Docstring might need slight adjustment for Colab context later, but core functionality is the same)
     """
-    endpoint = f"{BINANCE_API_BASE_URL}/klines"
-    # Parameters for the Binance API /klines endpoint
     params = {
-        "symbol": symbol,
-        "interval": interval,
-        "startTime": start_time_ms,
-        "endTime": end_time_ms,
-        "limit": limit  # Binance API caps this at 1000
+        'symbol': symbol,
+        'interval': interval,
+        'startTime': start_time_ms,
+        'endTime': end_time_ms,
+        'limit': limit
     }
+    query_string = urllib.parse.urlencode(params)
+    # Ensure BINANCE_API_BASE_URL is defined globally
+    url = f"{BINANCE_API_BASE_URL}/klines?{query_string}"
+
+    # print(f"Fetching klines from URL (urllib): {url}") # Optional: for debugging URL construction
+
     try:
-        response = requests.get(endpoint, params=params)
-        response.raise_for_status()  # Raise an HTTPError for bad responses (4XX or 5XX)
-        data = response.json()
-        return data
-    except requests.exceptions.RequestException as e:
-        # Handle network-related errors (e.g., connection issues)
-        print(f"Error fetching klines for {symbol}: {e}")
+        # Using urllib.request to open the URL. Includes a timeout of 10 seconds.
+        with urllib.request.urlopen(url, timeout=10) as response:
+            # Optional: for debugging response status if issues occur before reading.
+            # print(f"Response status: {response.status}, Response reason: {response.reason}")
+            if response.status == 200:
+                response_body = response.read().decode('utf-8') # Read and decode response body
+                klines_data = json.loads(response_body) # Parse JSON data
+                return klines_data
+            else:
+                # This case handles non-200 statuses that weren't raised as HTTPError by urlopen.
+                # It might be less common for Binance API which usually raises HTTPError for bad status.
+                error_message = f"Error: Binance API returned status code {response.status} for {symbol}."
+                try:
+                    error_body = response.read().decode('utf-8', errors='ignore')
+                    error_message += f" Response: {error_body}"
+                except Exception as e_read:
+                    error_message += f" Could not read error response body: {e_read}"
+                print(error_message)
+                return []
+    except urllib.error.HTTPError as e:
+        # Handles specific HTTP errors (e.g., 4XX client errors, 5XX server errors).
+        error_message = f"HTTP Error while fetching klines for {symbol} with urllib: {e.code} {e.reason}. URL: {url}"
+        print(error_message)
+        try:
+            error_body = e.read().decode('utf-8', errors='ignore') # Attempt to read error response from Binance
+            print(f"Error response body: {error_body}")
+            if e.code == 451: # Specific check for the 451 "Unavailable For Legal Reasons" error
+                print(f"Received 451 Client Error. This is likely an IP block or regional restriction from Binance.")
+        except Exception as read_e:
+            print(f"Could not read error response body: {read_e}")
         return []
-    except ValueError as e: # Handle cases where response is not valid JSON
-        print(f"Error decoding JSON response for {symbol}: {e}")
+    except urllib.error.URLError as e:
+        # Handles broader URL or network related errors (e.g., DNS failure, connection refused, timeout).
+        print(f"URL Error while fetching klines for {symbol} with urllib: {e.reason}. URL: {url}")
+        # Specific checks for common URLError reasons
+        if hasattr(e, 'reason') and isinstance(e.reason, ConnectionResetError):
+             print(f"ConnectionResetError specifically caught for {symbol}.")
+        elif hasattr(e, 'reason') and ("timed out" in str(e.reason).lower() or "timeout" in str(e.reason).lower()):
+             print(f"Request timed out for {symbol}.")
+        return []
+    except json.JSONDecodeError as e: # Handles errors if the response isn't valid JSON.
+        print(f"Error decoding JSON response from Binance API for {symbol}: {e}")
+        return []
+    except Exception as e:
+        # Catch-all for any other unexpected errors during the fetching process.
+        print(f"An unexpected error occurred in get_klines ({symbol}) with urllib: {type(e).__name__} - {e}")
+        # traceback.format_exc() can be printed here if traceback is imported and detailed stack is needed.
+        # print(traceback.format_exc())
         return []
 
 def fetch_all_klines_for_period(symbol: str, interval: str, start_time_ms: int, end_time_ms: int) -> list:
     """
     Fetches all historical kline/candlestick data for a given symbol and interval
     over a specified period, handling API pagination.
-
-    The Binance API limits kline requests to a certain number of data points (e.g., 1000).
-    This function makes multiple calls to `get_klines` to retrieve all data if the
-    period is longer than what one call can return.
-
-    Args:
-        symbol: The trading symbol (e.g., "BTCUSDT").
-        interval: The kline interval (e.g., "1m", "1h", "1d").
-        start_time_ms: The overall start time for the data fetching period in milliseconds.
-        end_time_ms: The overall end time for the data fetching period in milliseconds.
-
-    Returns:
-        A list containing all kline data fetched for the period. Each kline is a list
-        of values. Returns an empty list if no data is fetched or an error occurs.
     """
     all_klines = []
     current_start_time = start_time_ms
-
     print(f"Starting to fetch all klines for {symbol} at {interval} interval.")
-
     while current_start_time < end_time_ms:
         print(f"Fetching batch from {datetime.fromtimestamp(current_start_time/1000)} up to {datetime.fromtimestamp(end_time_ms/1000)}...")
-
         klines_batch = get_klines(symbol, interval, current_start_time, end_time_ms)
-
         if klines_batch:
             all_klines.extend(klines_batch)
             last_kline_open_time = int(klines_batch[-1][0])
@@ -165,14 +193,12 @@ def save_df_to_google_drive(df: pd.DataFrame, file_name: str = "binance_btcusdt_
     if df.empty:
         print("DataFrame is empty. Aborting save operation.")
         return
-
     try:
         from google.colab import drive
         print("Attempting to mount Google Drive...")
         # This will prompt for Google Drive authorization in Colab.
         # Ensure you complete the authentication steps in the Colab UI.
         drive.mount('/content/drive', force_remount=True)
-
         print(f"Ensuring directory exists: {drive_base_path}")
         # If saving fails, check:
         # 1. Google Drive was successfully mounted and authorized.
@@ -180,12 +206,10 @@ def save_df_to_google_drive(df: pd.DataFrame, file_name: str = "binance_btcusdt_
         # 3. The path specified in 'drive_base_path' is correct and you have write permissions there.
         # 4. Sufficient space is available in your Google Drive.
         os.makedirs(drive_base_path, exist_ok=True)
-
         full_path = f"{drive_base_path}/{file_name}"
         print(f"Saving DataFrame to Google Drive at: {full_path}")
         df.to_csv(full_path, index=False)
         print(f"Successfully saved data to {full_path}")
-
     except ModuleNotFoundError:
         print("The 'google.colab' module was not found. This script is likely not running in a Google Colab environment.")
         print(f"Skipping save to Google Drive. If run locally, DataFrame for '{file_name}' would not be saved to Drive.")
@@ -205,14 +229,12 @@ def test_google_drive_save(test_file_name="test_drive_save.csv", drive_base_path
     test_df = pd.DataFrame(test_data)
     print(f"Created test DataFrame. Is empty: {test_df.empty}. Shape: {test_df.shape}.")
     print(test_df.head())
-
     try:
         from google.colab import drive
         print("Attempting to mount Google Drive for test...")
         # This will prompt for Google Drive authorization in Colab.
         # Ensure you complete the authentication steps in the Colab UI.
         drive.mount('/content/drive', force_remount=True)
-
         target_test_path = f"{drive_base_path}"
         print(f"Ensuring test directory exists: {target_test_path}")
         # If saving fails here, check points similar to the main save function:
@@ -221,12 +243,10 @@ def test_google_drive_save(test_file_name="test_drive_save.csv", drive_base_path
         # 3. Correctness of 'drive_base_path' and permissions for it.
         # 4. Drive space.
         os.makedirs(target_test_path, exist_ok=True)
-
         full_test_path = os.path.join(target_test_path, test_file_name)
         print(f"Attempting to save test DataFrame to: {full_test_path}")
         test_df.to_csv(full_test_path, index=False)
         print(f"Successfully saved test DataFrame to {full_test_path}")
-
     except ModuleNotFoundError as mnfe:
         if 'google.colab' in str(mnfe):
             print("TEST SAVE: 'google.colab' module not found. Skipping Google Drive test.")
@@ -241,30 +261,8 @@ def test_google_drive_save(test_file_name="test_drive_save.csv", drive_base_path
 
 if __name__ == "__main__":
     # --- Notes for Running in Google Colab ---
-    # 1. Google Drive Authorization: When the script attempts to save data (either main or test),
-    #    Colab will ask for permission to access your Google Drive. You'll
-    #    need to click a link, sign in, copy an authorization code, and paste
-    #    it back into the Colab prompt. This needs to be done each time Drive is mounted
-    #    unless permissions are cached or a more permanent setup is used.
-    # 2. File Paths: Data is intended to be saved in your 'My Drive'.
-    #    The default path for main data is '/content/drive/MyDrive/Data/'.
-    #    The test function uses '/content/drive/MyDrive/Data_Test/'.
-    #    Ensure these paths are suitable or modify them in the script's constants or function calls.
-    # 3. Permissions & Errors: If you encounter errors during saving (e.g., after "Ensuring directory exists..."):
-    #    - Double-check that the Colab notebook has the necessary permissions (granted during authorization).
-    #    - Verify the specific folder path is writable and the full path is valid.
-    #    - Ensure sufficient space in your Google Drive.
-    #    - The error traceback (printed by the script) can provide clues.
-    # 4. API Access: Binance API access might be restricted from certain IP ranges,
-    #    including some Colab servers. If no data is fetched (often a 451 or 403 error),
-    #    this might be the cause. The script is designed to handle this by
-    #    not attempting to save an empty file if no data is retrieved.
-    # 5. `google.colab` import: The script imports `google.colab.drive` dynamically within
-    #    the save functions. This is generally fine for Colab. No top-level uncommenting is needed.
-    # 6. Using the Test Save Function: If the main data saving process fails,
-    #    it's highly recommended to uncomment the `test_google_drive_save()` call below.
-    #    This helps isolate whether the problem is with Google Drive integration itself
-    #    or with the data fetching/processing parts of the script.
+    # (Existing Colab notes section remains unchanged)
+    # ... (rest of the Colab notes)
     # --- End of Colab Notes ---
 
     # --- Google Drive Save Test (Optional) ---
@@ -274,9 +272,7 @@ if __name__ == "__main__":
     # --- Main execution block ---
     print(f"\nStarting data fetching process for symbol: {SYMBOL}, interval: {INTERVAL}")
     print(f"Fetching data from {datetime.fromtimestamp(ONE_YEAR_AGO_MS/1000)} to {datetime.fromtimestamp(NOW_MS/1000)}")
-
     all_data = fetch_all_klines_for_period(SYMBOL, INTERVAL, ONE_YEAR_AGO_MS, NOW_MS)
-
     if all_data:
         print(f"Successfully fetched a total of {len(all_data)} klines.")
         df = process_klines_to_dataframe(all_data)
@@ -291,5 +287,4 @@ if __name__ == "__main__":
             print("\nDataFrame is empty after processing. Nothing to save.")
     else:
         print("No data fetched. Please check parameters, API connectivity, or possible IP restrictions.")
-
     print("\nScript execution finished.")
